@@ -134,7 +134,131 @@ watch -n 1 'netstat -an | grep SYN_RECV | wc -l'
 # Live packet capture from attacker
 sudo tcpdump -i enp0s3 -n src 10.0.0.2
 ```
+Phase 5 — Defense
 
+Defenses were applied while attacks were live to observe real-time mitigation.
+
+Defense 1: SYN Flood
+
+Enable SYN cookies:
+```bash
+sudo sysctl -w net.ipv4.tcp_syncookies=1
+```
+Server stops allocating memory for incomplete handshakes.
+
+Reduce SYN-ACK retries:
+```bash
+sudo sysctl -w net.ipv4.tcp_synack_retries=1
+```
+
+Increase backlog queue:
+```bash
+sudo sysctl -w net.ipv4.tcp_max_syn_backlog=4096
+```
+
+Rate limit SYN packets:
+```bash
+sudo iptables -A INPUT -p tcp --syn -m limit --limit 10/s --limit-burst 20 -j ACCEPT
+sudo iptables -A INPUT -p tcp --syn -j DROP
+```
+
+Make permanent:
+```bash
+echo "net.ipv4.tcp_syncookies = 1" | sudo tee -a /etc/sysctl.conf
+echo "net.ipv4.tcp_synack_retries = 1" | sudo tee -a /etc/sysctl.conf
+echo "net.ipv4.tcp_max_syn_backlog = 4096" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+```
+
+Defense 2: UDP Flood
+
+Rate limit incoming UDP:
+```bash
+sudo iptables -A INPUT -p udp -m limit --limit 10/s --limit-burst 20 -j ACCEPT
+sudo iptables -A INPUT -p udp -j DROP
+```
+
+Limit ICMP error responses:
+```bash
+sudo iptables -A OUTPUT -p icmp --icmp-type port-unreachable -m limit --limit 5/s -j ACCEPT
+sudo iptables -A OUTPUT -p icmp --icmp-type port-unreachable -j DROP
+```
+
+Defense 3: ICMP Flood
+
+Rate limit ICMP (keeps ping working for diagnostics):
+```bash
+sudo iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 4/s --limit-burst 8 -j ACCEPT
+sudo iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
+```
+
+Defense 4: Slowloris
+
+Enable mod_reqtimeout — kills partial connections:
+```bash
+sudo a2enmod reqtimeout
+sudo systemctl restart apache2
+```
+
+Limit connections per IP:
+```bash
+sudo iptables -A INPUT -p tcp --dport 80 -m connlimit --connlimit-above 20 -j DROP
+```
+
+Install and configure fail2ban:
+```bash
+sudo apt install fail2ban -y
+sudo systemctl start fail2ban
+sudo systemctl enable fail2ban
+```
+```bash
+sudo nano /etc/fail2ban/jail.local
+```
+```
+[apache-conn-limit]
+enabled  = true
+port     = http,https
+filter   = apache-conn-limit
+logpath  = /var/log/apache2/error.log
+maxretry = 3
+bantime  = 600
+findtime = 60
+```
+```bash
+sudo systemctl restart fail2ban
+sudo fail2ban-client status
+```
+
+Verify defenses
+```bash
+# Watch DROP count climb — every number is a blocked packet
+sudo iptables -L -v -n | grep DROP
+
+# Confirm Apache stayed alive
+watch -n 1 'curl -s --max-time 2 http://10.0.0.1 > /dev/null && echo "ALIVE" || echo "DEAD"'
+```
+
+Cleanup after each test
+```bash
+sudo iptables -F
+sudo iptables -X
+sudo iptables -Z
+```
+
+---
+
+Results
+
+Real numbers from the lab:
+
+(Attack - Defense Applied - Packets Blocked - Outcome )
+
+1. SYN Flood - SYN cookies + iptables rate limit - SYN_RECV dropped to near 0 - Apache recovered
+2. UDP Flood - iptables rate limit + ICMP cap - 259,000 packets (7.2MB) blocked - CPU load normalized 
+3. ICMP Flood - iptables echo-request rate limit - 21,102 dropped, 181 allowed - Bandwidth cleared 
+4. Slowloris - mod_reqtimeout + connlimit - 83 connections rejected - Apache recovered 
+
+---
 Safety & Ethics
 
 This lab was conducted in a fully isolated environment. Key safety measures:
@@ -161,6 +285,11 @@ Tools Reference
 `slowloris` HTTP layer DoS 
 `tcpdump` Packet capture and analysis 
 `netstat` Connection state monitoring 
+`iftop` Live bandwidth monitoring 
+`iptables`  Linux firewall and rate limiting 
+`fail2ban`  Automated IP banning based on log analysis 
+`mod_reqtimeout`  Apache module enforcing request deadlines 
+`sysctl`  Kernel parameter configuration 
 
 
 ---
